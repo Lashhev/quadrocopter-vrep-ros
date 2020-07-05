@@ -21,10 +21,6 @@ function StereoCamera:getSensorInfo(number)
   return result, resolution, view_angle
 end
 
--- function StereoCamera:getDisparityImage()
-  
--- end
-
 function StereoCamera:getDepthBuffer(number)
   local leftAndRightColors=nil
   local result = simVision.handleAnaglyphStereo(self.vision_handler, self.vision_sensor_handlers, leftAndRightColors)

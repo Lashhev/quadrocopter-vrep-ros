@@ -22,10 +22,13 @@ function RosInterface:new(frame_id, topic_prefix)
     self.left_camera_info_publisher = simROS.advertise(topic_prefix .. "/left/camera_info", "sensor_msgs/CameraInfo", 10)
     self.left_depth_publisher = simROS.advertise(topic_prefix .. "/left/depth", "sensor_msgs/Image", 10)
     self.right_depth_publisher = simROS.advertise(topic_prefix .. "/right/depth", "sensor_msgs/Image", 10)
+    self.right_imu_publisher = simROS.advertise(topic_prefix .. "/Imu", "sensor_msgs/Imu", 10)
+    self.lidar_publisher = simROS.advertise(topic_prefix .. "/Lidar", "sensor_msgs/PointCloud", 10)
     simROS.publisherTreatUInt8ArrayAsString(self.left_image_publisher)
     simROS.publisherTreatUInt8ArrayAsString(self.right_image_publisher)
     simROS.publisherTreatUInt8ArrayAsString(self.left_depth_publisher)
     simROS.publisherTreatUInt8ArrayAsString(self.right_depth_publisher)
+    simROS.publisherTreatUInt8ArrayAsString(self.lidar_publisher)
     self.local_pos_msg = {}
     self.left_image_msg = {}
     self.right_image_msg = {}
@@ -34,6 +37,8 @@ function RosInterface:new(frame_id, topic_prefix)
     self.right_camera_info_msg = {}
     self.left_depth_msg = {}
     self.right_depth_msg = {}
+    self.lidar_msg = {}
+    self.imu_msg = {}
     self.seq = 0
     self.frame_id = frame_id
     -- end
@@ -56,17 +61,19 @@ function RosInterface:getLocalPosMsg(position_vector, orientation_vector)
     self.local_pos_msg = {header = header, pose = {position = position, orientation = orientation}}
 end
 
-function RosInterface:getTransformStamped(position_vector, orientation_vector,name,relToName)
-  -- This function retrieves the stamped transform for a specific object
-  local header = self:getHeaderMsg(relToName)
-  local position = {x=position_vector[1], y=position_vector[2], z=position_vector[3]}
-  local orientation = Quaternion:new(orientation_vector[3], orientation_vector[2], orientation_vector[1])
-  self.tf_msg =  {
-      header=header,
+function RosInterface:getTransformStamped(objHandle,name,relTo,relToName)
+  print(objHandle)
+  p=sim.getObjectPosition(objHandle,relTo)
+  o=sim.getObjectQuaternion(objHandle,relTo)
+  return {
+      header={
+          stamp=t,
+          frame_id=relToName
+      },
       child_frame_id=name,
       transform={
-          translation=position,
-          rotation=orientation
+          translation={x=p[1],y=p[2],z=p[3]},
+          rotation={x=o[1],y=o[2],z=o[3],w=o[4]}
       }
   }
 end
@@ -75,11 +82,11 @@ function RosInterface:getImageMsg(vision_sensor)
   local header = self:getHeaderMsg(vision_sensor.name)
   local buffer, resolution_x, resolution_y = vision_sensor:getSensorImage(1)
   sim.transformImage(buffer,{resolution_x,resolution_y},4)
-  self.left_image_msg = {header = header, data = buffer, height = resolution_y, width = resolution_x, encoding = "bgr8", is_bigendian = 1, step = resolution_x*1*3}
+  self.left_image_msg = {header = header, data = buffer, height = resolution_y, width = resolution_x, encoding = "rgb8", is_bigendian = 1, step = resolution_x*1*3}
   header = self:getHeaderMsg(vision_sensor.name)
   buffer, resolution_x, resolution_y = vision_sensor:getSensorImage(2)
   sim.transformImage(buffer,{resolution_x,resolution_y},4)
-  self.right_image_msg = {header = header, data = buffer, height = resolution_y, width = resolution_x, encoding = "bgr8", is_bigendian = 1, step = resolution_x*1*3}
+  self.right_image_msg = {header = header, data = buffer, height = resolution_y, width = resolution_x, encoding = "rgb8", is_bigendian = 1, step = resolution_x*1*3}
 end
 
 function RosInterface:getCameraInfoMsg(vision_sensor)
@@ -112,6 +119,17 @@ function RosInterface:fillDepthMsg(vision_sensor, number)
   return msg
 end
 
+function RosInterface:getPointCloudMsg(data)
+  self.lidar_msg = self:fillPointCloudMsg(data)
+end
+
+function RosInterface:fillPointCloudMsg(data)
+  pub_data={}
+  pub_data['header']=self:getHeaderMsg('velodyneVPL')
+  pub_data['points']=data
+  return pub_data
+end
+
 function RosInterface:fillCameraInfo(vision_sensor, header, number)
   local info = {}
   local result, resolution, view_angle = vision_sensor:getSensorInfo(number)
@@ -137,6 +155,15 @@ function RosInterface:fillCameraInfo(vision_sensor, header, number)
   end
 end
 
+function RosInterface:getImuMsg(orientation_vector, linear_accel, angular_velocity_vector)
+    local header = self:getHeaderMsg(self.frame_id)
+    local orientation = Quaternion:new(orientation_vector[3], orientation_vector[2], orientation_vector[1])
+    local linear_acceleration = {x=linear_accel[1], y=linear_accel[2], z=linear_accel[2]}
+    local angular_velocity = {x=angular_velocity_vector[1], y=angular_velocity_vector[2], z=angular_velocity_vector[2]}
+    self.imu_msg = {header = header, angular_velocity = angular_velocity, orientation = orientation, linear_acceleration=linear_acceleration}
+
+end
+
 function RosInterface:publish()
     simROS.publish(self.local_pose_publisher, self.local_pos_msg)
     self.seq = self.seq + 1;
@@ -146,8 +173,12 @@ function RosInterface:publish()
     simROS.publish(self.left_camera_info_publisher, self.left_camera_info_msg)
     simROS.publish(self.left_depth_publisher, self.left_depth_msg)
     simROS.publish(self.right_depth_publisher, self.right_depth_msg)
-    simROS.sendTransform(self.tf_msg)
-  end
+    simROS.publish(self.lidar_publisher,self.lidar_msg)
+end
+
+function RosInterface:sendTransform(objHandle,name,relTo,relToName)
+    simROS.sendTransform(self:getTransformStamped(objHandle,name,relTo,relToName))
+end
 function RosInterface:clearup()
     simROS.shutdownPublisher(self.local_pose_publisher)
     simROS.shutdownPublisher(self.left_image_publisher)
@@ -156,5 +187,6 @@ function RosInterface:clearup()
     simROS.shutdownPublisher(self.left_camera_info_publisher)
     simROS.shutdownPublisher(self.left_depth_publisher)
     simROS.shutdownPublisher(self.right_depth_publisher)
+    simROS.shutdownPublisher(self.lidar_publisher)
   end
 return RosInterface
