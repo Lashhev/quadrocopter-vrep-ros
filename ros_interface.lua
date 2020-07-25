@@ -2,7 +2,7 @@ local Quaternion = require('quaternion')
 local RosInterface = {}
 RosInterface.__index = RosInterface
 
-function RosInterface:new(frame_id, topic_prefix)
+function RosInterface:new(frame_id, topic_prefix, is_stereo, is_lidar)
     local self = setmetatable({}, RosInterface)
     local moduleName=0
     local index=0
@@ -14,42 +14,44 @@ function RosInterface:new(frame_id, topic_prefix)
         end
         index=index+1
     end
+    self.is_stereo = is_stereo
+    self.is_lidar = is_lidar
     -- if rosInterfacePresent == true then
     self.local_pose_publisher = simROS.advertise(frame_id .. "/Local_pose", "geometry_msgs/PoseStamped", 10)
-    self.left_image_publisher = simROS.advertise(topic_prefix .. "/left/image_raw", "sensor_msgs/Image", 10)
-    self.right_image_publisher = simROS.advertise(topic_prefix .. "/right/image_raw", "sensor_msgs/Image", 10)
-    self.right_camera_info_publisher = simROS.advertise(topic_prefix .. "/right/camera_info", "sensor_msgs/CameraInfo", 10)
-    self.left_camera_info_publisher = simROS.advertise(topic_prefix .. "/left/camera_info", "sensor_msgs/CameraInfo", 10)
-    self.left_depth_publisher = simROS.advertise(topic_prefix .. "/left/depth", "sensor_msgs/Image", 10)
-    self.right_depth_publisher = simROS.advertise(topic_prefix .. "/right/depth", "sensor_msgs/Image", 10)
+    self.odometry_publisher = simROS.advertise(frame_id .. "/odometry", "nav_msgs/Odometry", 10)
+    if self.is_stereo then
+      self.left_image_publisher = simROS.advertise(topic_prefix .. "/left/image_raw", "sensor_msgs/Image", 10)
+      self.right_image_publisher = simROS.advertise(topic_prefix .. "/right/image_raw", "sensor_msgs/Image", 10)
+      self.right_camera_info_publisher = simROS.advertise(topic_prefix .. "/right/camera_info", "sensor_msgs/CameraInfo", 10)
+      self.left_camera_info_publisher = simROS.advertise(topic_prefix .. "/left/camera_info", "sensor_msgs/CameraInfo", 10)
+      self.left_depth_publisher = simROS.advertise(topic_prefix .. "/left/depth", "sensor_msgs/Image", 10)
+      self.right_depth_publisher = simROS.advertise(topic_prefix .. "/right/depth", "sensor_msgs/Image", 10)
+      simROS.publisherTreatUInt8ArrayAsString(self.left_image_publisher)
+      simROS.publisherTreatUInt8ArrayAsString(self.right_image_publisher)
+      simROS.publisherTreatUInt8ArrayAsString(self.left_depth_publisher)
+      simROS.publisherTreatUInt8ArrayAsString(self.right_depth_publisher)
+      self.left_image_msg = {}
+      self.right_image_msg = {}
+      self.tf_msg = {}
+      self.left_camera_info_msg = {}
+      self.right_camera_info_msg = {}
+      self.left_depth_msg = {}
+      self.right_depth_msg = {}
+    end
     self.right_imu_publisher = simROS.advertise(topic_prefix .. "/Imu", "sensor_msgs/Imu", 10)
-    self.lidar_publisher = simROS.advertise(topic_prefix .. "/Lidar", "sensor_msgs/PointCloud", 10)
-    simROS.publisherTreatUInt8ArrayAsString(self.left_image_publisher)
-    simROS.publisherTreatUInt8ArrayAsString(self.right_image_publisher)
-    simROS.publisherTreatUInt8ArrayAsString(self.left_depth_publisher)
-    simROS.publisherTreatUInt8ArrayAsString(self.right_depth_publisher)
-    simROS.publisherTreatUInt8ArrayAsString(self.lidar_publisher)
+    if self.is_lidar then
+      self.lidar_publisher = simROS.advertise(topic_prefix .. "/Lidar", "sensor_msgs/PointCloud", 10)
+      simROS.publisherTreatUInt8ArrayAsString(self.lidar_publisher)
+      self.lidar_msg = {}
+    end
     self.local_pos_msg = {}
-    self.left_image_msg = {}
-    self.right_image_msg = {}
-    self.tf_msg = {}
-    self.left_camera_info_msg = {}
-    self.right_camera_info_msg = {}
-    self.left_depth_msg = {}
-    self.right_depth_msg = {}
-    self.lidar_msg = {}
+    self.odometry_msg = {}
     self.imu_msg = {}
     self.seq = 0
     self.frame_id = frame_id
-    -- end
-    if self.local_pose_publisher ~= nil and self.left_image_publisher ~= nil and self.right_image_publisher ~= nil and self.right_camera_info_publisher ~= nil and self.left_camera_info_publisher ~= nil and self.left_depth_publisher ~= nil and self.right_depth_publisher ~= nil then
-      print("Successfully initiated publishers")
-      return self
-    else
-      print("Failed to initiate publishers")
-      return nil
-    end
+    return self
   end
+
 function RosInterface:getHeaderMsg(frame_id)
     return {stamp = sim.getSimulationTime(), frame_id = frame_id, seq = self.seq}
 end
@@ -61,8 +63,17 @@ function RosInterface:getLocalPosMsg(position_vector, orientation_vector)
     self.local_pos_msg = {header = header, pose = {position = position, orientation = orientation}}
 end
 
+function RosInterface:getOdometryMsg(position_vector, orientation_vector)
+  local header = self:getHeaderMsg(self.frame_id)
+  local position = {x=position_vector[1], y=position_vector[2], z=position_vector[3]}
+  local orientation = Quaternion:new(orientation_vector[3], orientation_vector[2], orientation_vector[1])
+  local pose1 = {position = position, orientation = orientation}
+  local pose2 = {}
+  pose2["pose"] = pose1
+  self.odometry_msg = {header = header, pose = pose2, twist = {}}
+end
+
 function RosInterface:getTransformStamped(objHandle,name,relTo,relToName)
-  print(objHandle)
   p=sim.getObjectPosition(objHandle,relTo)
   o=sim.getObjectQuaternion(objHandle,relTo)
   return {
@@ -166,14 +177,19 @@ end
 
 function RosInterface:publish()
     simROS.publish(self.local_pose_publisher, self.local_pos_msg)
+    simROS.publish(self.odometry_publisher, self.odometry_msg)
     self.seq = self.seq + 1;
-    simROS.publish(self.left_image_publisher, self.left_image_msg)
-    simROS.publish(self.right_image_publisher, self.right_image_msg)
-    simROS.publish(self.right_camera_info_publisher, self.right_camera_info_msg)
-    simROS.publish(self.left_camera_info_publisher, self.left_camera_info_msg)
-    simROS.publish(self.left_depth_publisher, self.left_depth_msg)
-    simROS.publish(self.right_depth_publisher, self.right_depth_msg)
-    simROS.publish(self.lidar_publisher,self.lidar_msg)
+    if(self.is_stereo) then
+      simROS.publish(self.left_image_publisher, self.left_image_msg)
+      simROS.publish(self.right_image_publisher, self.right_image_msg)
+      simROS.publish(self.right_camera_info_publisher, self.right_camera_info_msg)
+      simROS.publish(self.left_camera_info_publisher, self.left_camera_info_msg)
+      simROS.publish(self.left_depth_publisher, self.left_depth_msg)
+      simROS.publish(self.right_depth_publisher, self.right_depth_msg)
+    end
+    if(self.is_lidar) then
+      simROS.publish(self.lidar_publisher,self.lidar_msg)
+    end
 end
 
 function RosInterface:sendTransform(objHandle,name,relTo,relToName)
@@ -181,12 +197,17 @@ function RosInterface:sendTransform(objHandle,name,relTo,relToName)
 end
 function RosInterface:clearup()
     simROS.shutdownPublisher(self.local_pose_publisher)
-    simROS.shutdownPublisher(self.left_image_publisher)
-    simROS.shutdownPublisher(self.right_image_publisher)
-    simROS.shutdownPublisher(self.right_camera_info_publisher)
-    simROS.shutdownPublisher(self.left_camera_info_publisher)
-    simROS.shutdownPublisher(self.left_depth_publisher)
-    simROS.shutdownPublisher(self.right_depth_publisher)
-    simROS.shutdownPublisher(self.lidar_publisher)
+    simROS.shutdownPublisher(self.odometry_publisher)
+    if(self.is_stereo) then
+      simROS.shutdownPublisher(self.left_image_publisher)
+      simROS.shutdownPublisher(self.right_image_publisher)
+      simROS.shutdownPublisher(self.right_camera_info_publisher)
+      simROS.shutdownPublisher(self.left_camera_info_publisher)
+      simROS.shutdownPublisher(self.left_depth_publisher)
+      simROS.shutdownPublisher(self.right_depth_publisher)
+    end
+    if(self.is_lidar) then
+      simROS.shutdownPublisher(self.lidar_publisher)
+    end
   end
 return RosInterface

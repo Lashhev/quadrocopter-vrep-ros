@@ -6,16 +6,24 @@ local Vector = require('vector')
 local Quadrocopter = {}
 Quadrocopter.__index = Quadrocopter
 
-function Quadrocopter:new()
+function Quadrocopter:new(is_stereo, is_lidar)
     local self = setmetatable({}, Quadrocopter)
     -- Make sure we have version 2.4.13 or above (the particles are not supported otherwise)
     local v = sim.getInt32Parameter(sim.intparam_program_version)
     if (v < 20413) then
         sim.displayDialog('Warning','The propeller model is only fully supported from V-REP version 2.4.13 and above.&&nThis simulation will not run as expected!',sim.dlgstyle_ok,false,'',nil,{0.8,0,0,0,0,0})
     end
-    self.stereo = StereoCamera:new()
-    self.lidar = Velodyne:new()
-    self.ros_interface = RosInterface:new('Quadricopter_base', 'stereo')
+    self.is_stereo = is_stereo
+    self.is_lidar = is_lidar
+    self.Tt = 45
+    self.is_init = false
+    if (is_stereo) then
+      self.stereo = StereoCamera:new()
+    end
+    if (is_lidar) then
+      self.lidar = Velodyne:new()
+    end
+    self.ros_interface = RosInterface:new('Quadricopter_base', 'stereo', is_stereo, is_lidar)
     self.targetObj = sim.getObjectHandle('Quadricopter_target')
     if self.stereo == nil and self.ros_interface == nil and self.lidar == nil then
       print("Failed to initiate interfaces")
@@ -39,15 +47,15 @@ function Quadrocopter:new()
     self.heli = sim.getObjectAssociatedWithScript(sim.handle_self)
     
     self.obsticle_handlers ={-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1, -1}
-    -- for i=1,12,1 do
-    --   self.obsticle_handlers[i] =sim.getObjectHandle('240cmHighPillar50cm'..i)
-    -- end
+    for i=1,12,1 do
+      self.obsticle_handlers[i] =sim.getObjectHandle('240cmHighPillar50cm'..i)
+    end
     self.particlesTargetVelocities = {0,0,0,0}
 
     self.pParam=2
     self.iParam=0
     self.dParam=0
-    self.vParam=-2
+    self.vParam=-6
 
     self.cumul=0
     self.lastE=0
@@ -59,8 +67,14 @@ function Quadrocopter:new()
     self.prevEuler=0
     
     self.nextPoint = Vector.new(0,0,0)
-    self.targetPos_loc = {}
+    self.targetPos_loc = sim.getObjectPosition(self.targetObj_loc, -1)
+    self.K_Fo = 3
+    self.K_t = 0.5
+    self.min_dist = 0.7
+    self.distances_to_obst = {0,0,0,0,0,0,0,0,0,0,0,0}
 
+    self.start_time = sim.getSimulationTime()
+    self.perfection_time_printed = false
     self.shadowCont = {}
     self.fakeShadow = sim.getScriptSimulationParameter(sim.handle_self,'fakeShadow')
     if (self.fakeShadow) then
@@ -79,6 +93,10 @@ function Quadrocopter:new()
 
 function Quadrocopter:fillLocalPoseMsg(position_vector, orientation_vector)
   self.ros_interface:getLocalPosMsg(position_vector, orientation_vector)
+end
+
+function Quadrocopter:fillOdometryMsg(position_vector, orientation_vector)
+  self.ros_interface:getOdometryMsg(position_vector, orientation_vector)
 end
 
 function Quadrocopter:fillPointCloudMsg(data)
@@ -108,8 +126,13 @@ end
 
 function Quadrocopter:publish()
   self.ros_interface:publish()
-  self.ros_interface:sendTransform(self.lidar.visionSensorHandles[1],'velodyneVPL',-1,'world')
-  self.ros_interface:sendTransform(self.stereo.vision_sensor_handlers[1],self.stereo.name,-1,'world')
+  if (self.is_lidar) then
+    self.ros_interface:sendTransform(self.lidar.visionSensorHandles[1],'velodyneVPL',-1,'world')
+  end
+  if (self.is_stereo) then
+    self.ros_interface:sendTransform(self.stereo.vision_sensor_handlers[1],self.stereo.name,-1,'world')
+  end
+  
 end
 
 function Quadrocopter:update()
@@ -119,6 +142,10 @@ function Quadrocopter:update()
   local betaCorr = 0
   local rotCorr = 0
   local orientation = 0
+  if (self.is_init==false) then
+    print('Target time: '..self.Tt)
+    self.is_init = true
+  end
   self:update_next_point()
   -- Vertical control:
   position, thrust = self:vertical_control()
@@ -130,12 +157,17 @@ function Quadrocopter:update()
   --Fill ROS msgs and publish them
   local linear_velocity, angular_velocity = sim.getObjectVelocity(self.d)
   self:fillLocalPoseMsg(position, orientation)
-  self:fillImageMsg()
-  self:fillCameraInfoMsg()
-  self:fillDepthMsg()
+  self:fillOdometryMsg(position, orientation)
+  if (self.is_stereo) then
+    self:fillImageMsg()
+    self:fillCameraInfoMsg()
+    self:fillDepthMsg()
+  end
   self:fillImuMsg(orientation, angular_velocity, angular_velocity)
-  local lidar_data = self.lidar:getRawData()
-  self:fillPointCloudMsg(lidar_data)
+  if (self.is_lidar) then
+    local lidar_data = self.lidar:getRawData()
+    self:fillPointCloudMsg(lidar_data)
+  end
   self:publish()
   -- Decide of the motor velocities:
   self:update_speed(thrust, alphaCorr, betaCorr, rotCorr)
@@ -144,7 +176,9 @@ end
 
 function Quadrocopter:clearup()
   self.ros_interface:clearup()
-  self.lidar:clearup()
+  if (self.is_lidar) then
+    self.lidar:clearup()
+  end
   sim.removeDrawingObject(self.shadowCont)
   sim.floatingViewRemove(self.floorView)
   sim.floatingViewRemove(self.frontView)
@@ -171,9 +205,9 @@ function Quadrocopter:horizontal_control()
   local vy = {0,1,0}
   vy = sim.multiplyVector(m,vy)
   local alphaE = (vy[3] - m[12])
-  local alphaCorr = 0.4 * alphaE + 1.5 * (alphaE - self.pAlphaE)
+  local alphaCorr = 0.25 * alphaE + 2.1 * (alphaE - self.pAlphaE)
   local betaE=(vx[3] - m[12])
-  local betaCorr = -0.4*betaE-1.5*(betaE-self.pBetaE)
+  local betaCorr = -0.25*betaE-2.1*(betaE-self.pBetaE)
   self.pAlphaE = alphaE
   self.pBetaE = betaE
   alphaCorr = alphaCorr+sp[2]*0.005+1*(sp[2]-self.psp2)
@@ -186,7 +220,7 @@ end
 function Quadrocopter:rotation_control()
   local euler = sim.getObjectOrientation(self.d, self.targetObj_loc)
   local orientation = sim.getObjectOrientation(self.d, -1)
-  local rotCorr = euler[3] * 0.1 + 2 * (euler[3]-self.prevEuler)
+  local rotCorr = euler[3] * 0.15 + 2 * (euler[3]-self.prevEuler)
   self.prevEuler=euler[3]
   return rotCorr, orientation
 end
@@ -211,24 +245,94 @@ function Quadrocopter:updateFakeShadow(position)
 end
 
 function Quadrocopter:update_next_point()
-  self.targetPos_loc=sim.getObjectPosition(self.targetObj_loc,-1)
-  local relPose = sim.getObjectPosition(self.targetObj,self.d)
-  local distance_to_targ = Vector.new(relPose[1], relPose[2], relPose[3]):length()
-  relPose = sim.getObjectPosition(self.targetObj_loc,self.d)
-  local distance_loc = Vector.new(relPose[1], relPose[2], relPose[3]):length()
-  if (distance_to_targ > 0.05 and distance_loc < 0.05) then
-    print('distance_loc='..distance_loc)
-    print('distance_to_targ='..distance_to_targ)
-    self.targetPos_loc[1]=self.targetPos_loc[1]+0.1
-      sim.setObjectPosition(self.targetObj_loc,-1, self.targetPos_loc)
+  local Fres = self:get_resist_forces()
+  -- local Fres = Vector.new(0,0,0)
+  -- print("Fres=")
+  -- print(Fres)
+  local targetPos = sim.getObjectPosition(self.targetObj,-1)
+  local targetPos_loc = sim.getObjectPosition(self.targetObj_loc,-1)
+  local Pos = sim.getObjectPosition(self.d,-1)
+
+  local main_target_vec = self:sub_arrays(targetPos, Pos)
+  local local_target_vec = self:sub_arrays(targetPos, targetPos_loc)
+  local d_to_loc_targ_vec = self:sub_arrays(targetPos_loc, Pos)
+  local distance_to_targ = main_target_vec:length()
+  local distance_loc = d_to_loc_targ_vec:length()
+
+  if (distance_to_targ > 0.1 and distance_loc < 0.2) then
+  -- if (distance_to_targ > 0.06) then  
+    local relPose_v = (main_target_vec*self.K_t + Fres):normalized()
+    local tPos_loc = Vector.new(self.targetPos_loc[1], self.targetPos_loc[2], self.targetPos_loc[3])  + relPose_v*0.01
+    local targetPos_loc_past = self.targetPos_loc
+    self.targetPos_loc = {tPos_loc.x, tPos_loc.y, tPos_loc.z}
+    sim.setObjectPosition(self.targetObj_loc,-1, self.targetPos_loc)
+    -- local z_angle = Vector.direction(Vector.new(0, 0, 0), relPose_v) 
+    -- local orientation_loc = {0, 0, z_angle}
+    -- sim.setObjectOrientation(self.targetObj_loc,-1, orientation_loc)
+  elseif (distance_to_targ <= 0.1 and distance_loc < 0.2 and self.perfection_time_printed == false) then
+    end_time = sim.getSimulationTime()
+    performance_time = end_time - self.start_time
+    print("performed trajectory for "..(performance_time).." s")
+    self.perfection_time_printed = true
+    print("Relative error: "..(math.abs(performance_time - self.Tt)/self.Tt))
   end
-  self.targetPos_loc=sim.getObjectPosition(self.targetObj_loc,-1)
 end
 
-function Quadrocopter:transform_point(point, m)
-  new_point = Vector.new(point[1],point[2],point[3])
-  local row1 = Vector.new(m[0], m[4], m[8])
-  return new_point
+function Quadrocopter:get_distances_to_obst()
+  for i=1,12,1 do
+    self.obsPos = sim.getObjectPosition(self.obsticle_handlers[i], -1)
+    self.Pos = sim.getObjectPosition(self.d, -1)
+    self.obsPos_loc = self:sub_arrays(self.obsPos, self.Pos)
+    self.distances_to_obst[i] = Vector.new(self.obsPos_loc.x, self.obsPos_loc.y, 0)
+    if(self.distances_to_obst[i]:length() > self.min_dist) then
+      self.distances_to_obst[i]=Vector.new(0,0,0)
+    end
+  end
+end
+
+function Quadrocopter:get_resist_forces()
+  self:get_distances_to_obst()
+  forces = Vector.new(0,0,0)
+  for i=1,12,1 do
+    beta = 0.1
+    force= Vector.new(0,0,0)
+    if (self.distances_to_obst[i] == Vector.new(0,0,0)) then
+    else
+      force = self:calculate_res_force(i, self.K_Fo, beta)
+    end
+
+    forces = forces + force
+  end
+  return forces
+end
+
+function Quadrocopter:sub_arrays(lh, rh)
+  local left = Vector.new(lh[1], lh[2],lh[3])
+  local right = Vector.new(rh[1], rh[2],rh[3])
+  local result = left - right
+  x, y, z = result:unpack()
+  return result
+end
+
+function Quadrocopter:add_arrays(lh, rh)
+  local left = Vector.new(lh[1], lh[2],lh[3])
+  local right = Vector.new(rh[1], rh[2],rh[3])
+  local result = left + right
+  x, y, z = result:unpack()
+  return result
+end
+
+function Quadrocopter:calculate_pos_force(moving_object, target, k)
+    vector_pos = target - moving_object
+    pos_force = k*vector_pos*(1/vector_pos:length())
+    return pos_force
+end
+
+function Quadrocopter:calculate_res_force(i, c, beta)
+    q = self.distances_to_obst[i]:length()
+    alfa = math.atan2(self.distances_to_obst[i].y, self.distances_to_obst[i].x)
+    res_force = -c*math.exp(-beta*q)*Vector.new(math.cos(alfa), math.sin(alfa), 0)
+    return res_force
 end
 return Quadrocopter
 

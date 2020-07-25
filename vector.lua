@@ -84,6 +84,7 @@ function vector:normalize()
         self.y = self.y / len
         self.z = self.z / len
     end
+    return self
 end
 
 function vector:normalized()
