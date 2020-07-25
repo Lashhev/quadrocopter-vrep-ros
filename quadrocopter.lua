@@ -15,6 +15,8 @@ function Quadrocopter:new(is_stereo, is_lidar)
     end
     self.is_stereo = is_stereo
     self.is_lidar = is_lidar
+    self.Tt = 45
+    self.is_init = false
     if (is_stereo) then
       self.stereo = StereoCamera:new()
     end
@@ -68,9 +70,11 @@ function Quadrocopter:new(is_stereo, is_lidar)
     self.targetPos_loc = sim.getObjectPosition(self.targetObj_loc, -1)
     self.K_Fo = 3
     self.K_t = 0.5
-    self.min_dist = 1.5
+    self.min_dist = 0.7
     self.distances_to_obst = {0,0,0,0,0,0,0,0,0,0,0,0}
 
+    self.start_time = sim.getSimulationTime()
+    self.perfection_time_printed = false
     self.shadowCont = {}
     self.fakeShadow = sim.getScriptSimulationParameter(sim.handle_self,'fakeShadow')
     if (self.fakeShadow) then
@@ -138,6 +142,10 @@ function Quadrocopter:update()
   local betaCorr = 0
   local rotCorr = 0
   local orientation = 0
+  if (self.is_init==false) then
+    print('Target time: '..self.Tt)
+    self.is_init = true
+  end
   self:update_next_point()
   -- Vertical control:
   position, thrust = self:vertical_control()
@@ -261,6 +269,12 @@ function Quadrocopter:update_next_point()
     -- local z_angle = Vector.direction(Vector.new(0, 0, 0), relPose_v) 
     -- local orientation_loc = {0, 0, z_angle}
     -- sim.setObjectOrientation(self.targetObj_loc,-1, orientation_loc)
+  elseif (distance_to_targ <= 0.1 and distance_loc < 0.2 and self.perfection_time_printed == false) then
+    end_time = sim.getSimulationTime()
+    performance_time = end_time - self.start_time
+    print("performed trajectory for "..(performance_time).." s")
+    self.perfection_time_printed = true
+    print("Relative error: "..(math.abs(performance_time - self.Tt)/self.Tt))
   end
 end
 
@@ -288,12 +302,6 @@ function Quadrocopter:get_resist_forces()
     end
 
     forces = forces + force
-    -- print("forces = ")
-    if i ==6 then
-    print("force["..i.."] = ")
-    print(force)
-    end
-    -- print(forces)
   end
   return forces
 end
